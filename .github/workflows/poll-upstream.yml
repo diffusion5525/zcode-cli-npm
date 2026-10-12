@@ -26,7 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
-      cli_version: ${{ steps.check.outputs.cli_version }}
       upstream_sha: ${{ steps.check.outputs.upstream_sha }}
     steps:
       - uses: actions/checkout@v4
@@ -64,6 +63,12 @@ jobs:
       UPSTREAM_SHA: ${{ needs.poll.outputs.upstream_sha }}
       REF: ${{ github.event.inputs.upstream_ref }}
     steps:
+      # 先 checkout 本仓库（run.js / package.json / README.md 在这里）
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.UPSTREAM_TOKEN }}
+
+      # 再 checkout 上游到 upstream/ 子目录
       - name: Checkout upstream at pinned SHA
         uses: actions/checkout@v4
         with:
@@ -79,10 +84,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24.14.0
-          cache: pnpm
-          cache-dependency-path: upstream/pnpm-lock.yaml
+          registry-url: https://registry.npmjs.org
 
-      - name: Install unzip (win assets) and system deps
+      - name: Install unzip (win assets)
         run: sudo apt-get update && sudo apt-get install -y unzip
 
       - name: pnpm install
@@ -134,13 +138,25 @@ jobs:
           if npm view "@cup319/zcode@$VER" version --registry https://registry.npmjs.org 2>/dev/null; then
             if [ "${{ github.event.inputs.force }}" = "true" ]; then
               echo "skip=false" >> "$GITHUB_OUTPUT"
-              echo "Version $VER already published but force=true; republishing as build metadata."
+              echo "Version $VER already published but force=true; bumping build number."
+              NEWVER="$(node -e "
+                const [maj,min,pat] = '$VER'.split('.').map(Number);
+                console.log(maj + '.' + min + '.' + (pat + 1));
+              ")"
+              cd stage && node -e "
+                const fs = require('fs');
+                const p = JSON.parse(fs.readFileSync('package.json','utf8'));
+                p.version = '$NEWVER';
+                fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+              "
+              echo "final_version=$NEWVER" >> "$GITHUB_OUTPUT"
             else
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "Version $VER already on npm; skipping."
             fi
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "final_version=$VER" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Update last-upstream-sha pointer
@@ -149,24 +165,25 @@ jobs:
 
       - name: Commit pointer
         if: steps.published.outputs.skip != 'true'
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: published for upstream ${{ env.UPSTREAM_SHA }} (cli ${{ steps.ver.outputs.cli_version }})"
-          file_pattern: .last-upstream-sha
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .last-upstream-sha
+          git commit -m "chore: published for upstream $UPSTREAM_SHA (cli ${{ steps.published.outputs.final_version }})" || echo "nothing to commit"
+          git push
 
       - name: Publish to npm
         if: steps.published.outputs.skip != 'true'
+        working-directory: stage
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          cd stage
-          npm publish --access public --registry https://registry.npmjs.org
+        run: npm publish --access public --registry https://registry.npmjs.org
 
       - name: Attach binaries to GitHub Release
         if: steps.published.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}
-          VER: ${{ steps.ver.outputs.cli_version }}
+          VER: ${{ steps.published.outputs.final_version }}
         run: |
           TAG="cli-v$VER"
           cd stage

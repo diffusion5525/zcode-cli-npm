@@ -1,51 +1,54 @@
-# @cup319/zcode
+# zcode-cli-npm
 
-[ZCode](https://github.com/zai-org/ZCode)（Z.ai 官方 GLM Coding Agent Harness）的命令行版，打包为 **免安装依赖的单文件可执行程序**，通过 npm 分发，支持 **Linux x64** 和 **Windows x64**。
+追踪 [zai-org/ZCode](https://github.com/zai-org/ZCode)（Z.ai 官方 GLM Coding Agent Harness）的上游更新，自动构建 Linux / Windows 单文件可执行程序，并发布到 npm 包 **[@cup319/zcode](https://www.npmjs.com/package/@cup319/zcode)**。
 
-> 本包为 ZCode 官方开源（Apache-2.0）CLI 的第三方再分发，未修改任何源码。上游项目：https://github.com/zai-org/ZCode
+> 本仓库是 ZCode CLI 的第三方自动再分发管道（Apache-2.0），不修改任何上游源码。
 
-## 安装
+## 工作原理
 
-```sh
-npm install -g @cup319/zcode
+```
+zai-org/ZCode (main)                    每 30 分钟轮询 (GitHub Actions)
+        │
+        ▼ 有新 commit？
+   .last-upstream-sha 对比
+        │ 不同 → 触发构建
+        ▼
+   pnpm install + 构建 CLI workspace
+        │
+        ▼
+   SEA 单文件打包（交叉编译）
+   ├─ zcode-linux-x64      (~272 MB)
+   └─ zcode-windows-x64.exe (~217 MB)
+        │
+        ▼
+   npm publish @cup319/zcode  +  GitHub Release（附二进制与 sha256）
 ```
 
-## 使用
+- 版本号取自上游 `apps/zcode-cli/package.json` 的 `version`。
+- 上游没动则跳过；同版本号被 force 重发时自动 +1 补丁位。
+- 每次发布会在本仓库留一条 `.last-upstream-sha` 提交，可追溯对应的上游 commit。
 
-```sh
-# 进入 TUI 交互界面
-zcode
+## 手动触发
 
-# 单次提示（headless）
-zcode -p "解释这个仓库的结构" --mode plan
+Actions → **Poll upstream ZCode and publish** → Run workflow：
 
-# 查看版本与帮助
-zcode --version
-zcode --help
-
-# 运行环境自检
-zcode doctor
-```
-
-首次使用需要登录：在 TUI 里输入 `/login`（支持 Z.AI / BigModel 浏览器授权），或使用 API Key 环境变量：
-
-```sh
-export ZCODE_MODEL=zai/glm-5.3        # 格式必须为 provider/model
-export ZCODE_BASE_URL=https://api.z.ai/api/anthropic
-export ANTHROPIC_API_KEY=<你的 Z.ai API Key>
-```
-
-## 平台支持
-
-| 平台 | 二进制 |
+| 输入 | 说明 |
 |---|---|
-| Linux x64 (glibc) | `zcode-linux-x64` |
-| Windows x64 | `zcode-windows-x64.exe` |
+| `upstream_ref` | 指定上游 commit/tag，留空用最新 main |
+| `force` | `true` 时即使版本号相同也重新发布 |
 
-安装后由 `zcode` 命令按当前平台自动选择对应二进制启动（单文件内嵌 Node.js 运行时与 TUI 资源，无需系统安装 Node.js）。
+## 仓库结构
 
-## 说明
+```
+.github/workflows/poll-upstream.yml   # 轮询 + 构建 + 发布流水线
+run.js                                 # npm 包启动器（按平台选二进制并 spawn）
+package.json                           # @cup319/zcode 包定义
+.last-upstream-sha                     # 最近一次发布的上游 commit 指针
+```
 
-- 版本号跟随上游 CLI 版本（当前对应 CLI 0.16.9 / 仓库 v3.15.1）。
-- 内嵌完整 TUI 资源、官方插件（visualize / documents / pdf / presentations / spreadsheets / browser-use 等）与 Playwright 运行时资产。
-- 许可证：Apache-2.0（保留上游版权与第三方声明，见包内 LICENSE 与 THIRD-PARTY-NOTICES.md…随二进制分发）。
+## Secrets
+
+| 名称 | 用途 |
+|---|---|
+| `NPM_TOKEN` | 发布 @cup319/zcode 到 npmjs |
+| `UPSTREAM_TOKEN` | 克隆上游 / 创建 Release（需 repo 权限的 PAT） |
