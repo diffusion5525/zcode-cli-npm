@@ -6,9 +6,9 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zai-org/ZCode.git"
+    "url": "git+https://github.com/diffusion5525/zcode-cli-npm.git"
   },
-  "homepage": "https://github.com/zai-org/ZCode",
+  "homepage": "https://github.com/diffusion5525/zcode-cli-npm#readme",
   "keywords": [
     "zcode",
     "zai",
