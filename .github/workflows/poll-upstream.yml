@@ -27,6 +27,7 @@ jobs:
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       upstream_sha: ${{ steps.check.outputs.upstream_sha }}
+      cli_version: ${{ steps.check.outputs.cli_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,19 +40,29 @@ jobs:
             echo "sha=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check upstream HEAD
+      - name: Check upstream HEAD and CLI version
         id: check
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}
         run: |
           SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/zai-org/ZCode/commits/main | jq -r .sha)"
           echo "upstream_sha=$SHA" >> "$GITHUB_OUTPUT"
+          VER="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github.raw+json" \
+            "https://api.github.com/repos/zai-org/ZCode/contents/apps/zcode-cli/package.json?ref=$SHA" | jq -r .version)"
+          echo "cli_version=$VER" >> "$GITHUB_OUTPUT"
+          ON_NPM="$(npm view "@cup319/zcode@$VER" version --registry https://registry.npmjs.org 2>/dev/null || true)"
           FORCE="${{ github.event.inputs.force }}"
-          if [ "$SHA" != "${{ steps.last.outputs.sha }}" ] || [ "$FORCE" = "true" ]; then
+          if [ "$FORCE" = "true" ]; then
             echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$ON_NPM" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "New CLI version $VER not on npm yet -> build & publish."
+          elif [ "$SHA" != "${{ steps.last.outputs.sha }}" ]; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "Version $VER already on npm (upstream moved to $SHA without version bump); skipping npm, no daily build configured."
           else
             echo "should_build=false" >> "$GITHUB_OUTPUT"
-            echo "Upstream unchanged ($SHA); nothing to do."
           fi
 
   build-and-publish:
