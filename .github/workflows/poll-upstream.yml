@@ -1,0 +1,179 @@
+name: Poll upstream ZCode and publish
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # 每 30 分钟检查一次上游
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream commit/tag to build (default: latest main)"
+        required: false
+        default: ""
+      force:
+        description: "Force publish even if version unchanged"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-zcode
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      cli_version: ${{ steps.check.outputs.cli_version }}
+      upstream_sha: ${{ steps.check.outputs.upstream_sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read last published upstream SHA
+        id: last
+        run: |
+          if [ -f .last-upstream-sha ]; then
+            echo "sha=$(cat .last-upstream-sha)" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check upstream HEAD
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}
+        run: |
+          SHA="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/zai-org/ZCode/commits/main | jq -r .sha)"
+          echo "upstream_sha=$SHA" >> "$GITHUB_OUTPUT"
+          FORCE="${{ github.event.inputs.force }}"
+          if [ "$SHA" != "${{ steps.last.outputs.sha }}" ] || [ "$FORCE" = "true" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream unchanged ($SHA); nothing to do."
+          fi
+
+  build-and-publish:
+    needs: poll
+    if: needs.poll.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      UPSTREAM_SHA: ${{ needs.poll.outputs.upstream_sha }}
+      REF: ${{ github.event.inputs.upstream_ref }}
+    steps:
+      - name: Checkout upstream at pinned SHA
+        uses: actions/checkout@v4
+        with:
+          repository: zai-org/ZCode
+          ref: ${{ env.REF || env.UPSTREAM_SHA }}
+          fetch-depth: 1
+          path: upstream
+          token: ${{ secrets.UPSTREAM_TOKEN }}
+
+      - name: Install pnpm
+        run: npm install -g pnpm@10.33.2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+          cache-dependency-path: upstream/pnpm-lock.yaml
+
+      - name: Install unzip (win assets) and system deps
+        run: sudo apt-get update && sudo apt-get install -y unzip
+
+      - name: pnpm install
+        working-directory: upstream
+        run: pnpm install --frozen-lockfile
+
+      - name: Build CLI workspace
+        working-directory: upstream
+        run: pnpm --filter @zcode/cli... build
+
+      - name: Build extra packages required by SEA
+        working-directory: upstream
+        run: |
+          # @zcode/shared 是纯 TS 源码包，SEA 收集器要求 dist/index.js
+          (cd packages/shared && ../../node_modules/.bin/tsc -p tsconfig.json --noEmit false)
+          for p in @zcode/node-repl-host @zcode/android-emulator-plugin @zcode/browser-use-plugin @zcode/ios-simulator-plugin; do
+            pnpm --filter "$p" build || echo "WARN: $p build failed, continuing"
+          done
+
+      - name: Build SEA binaries (linux-x64, win-x64)
+        working-directory: upstream/apps/zcode-cli/packages/cli
+        run: node scripts/build-sea.mjs --target linux-x64 --target win-x64
+
+      - name: Resolve CLI version
+        id: ver
+        working-directory: upstream
+        run: |
+          VER="$(node -p "require('./apps/zcode-cli/package.json').version")"
+          echo "cli_version=$VER" >> "$GITHUB_OUTPUT"
+          echo "CLI version: $VER"
+
+      - name: Stage npm package
+        run: |
+          mkdir -p stage
+          cp run.js package.json README.md stage/
+          cp upstream/LICENSE stage/LICENSE
+          cp upstream/apps/zcode-cli/packages/cli/dist/zcode-linux-x64 stage/
+          cp upstream/apps/zcode-cli/packages/cli/dist/zcode-windows-x64.exe stage/
+          chmod 755 stage/zcode-linux-x64 stage/run.js
+
+      - name: Smoke test linux binary
+        run: ./stage/zcode-linux-x64 --version
+
+      - name: Check if version already published
+        id: published
+        env:
+          VER: ${{ steps.ver.outputs.cli_version }}
+        run: |
+          if npm view "@cup319/zcode@$VER" version --registry https://registry.npmjs.org 2>/dev/null; then
+            if [ "${{ github.event.inputs.force }}" = "true" ]; then
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "Version $VER already published but force=true; republishing as build metadata."
+            else
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Version $VER already on npm; skipping."
+            fi
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update last-upstream-sha pointer
+        if: steps.published.outputs.skip != 'true'
+        run: echo "$UPSTREAM_SHA" > .last-upstream-sha
+
+      - name: Commit pointer
+        if: steps.published.outputs.skip != 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: published for upstream ${{ env.UPSTREAM_SHA }} (cli ${{ steps.ver.outputs.cli_version }})"
+          file_pattern: .last-upstream-sha
+
+      - name: Publish to npm
+        if: steps.published.outputs.skip != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd stage
+          npm publish --access public --registry https://registry.npmjs.org
+
+      - name: Attach binaries to GitHub Release
+        if: steps.published.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}
+          VER: ${{ steps.ver.outputs.cli_version }}
+        run: |
+          TAG="cli-v$VER"
+          cd stage
+          sha256sum zcode-linux-x64 zcode-windows-x64.exe > sha256.txt
+          gh release create "$TAG" --repo diffusion5525/zcode-cli-npm \
+            --title "ZCode CLI $VER" \
+            --notes "Upstream: zai-org/ZCode@$UPSTREAM_SHA" \
+            zcode-linux-x64 zcode-windows-x64.exe sha256.txt || \
+          gh release upload "$TAG" --repo diffusion5525/zcode-cli-npm --clobber \
+            zcode-linux-x64 zcode-windows-x64.exe sha256.txt

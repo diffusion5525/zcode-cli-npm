@@ -1,0 +1,40 @@
+{
+  "name": "@cup319/zcode",
+  "version": "0.16.9",
+  "description": "ZCode CLI - Z.ai's coding agent (GLM official harness) as standalone binaries for Linux x64 and Windows x64",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zai-org/ZCode.git"
+  },
+  "homepage": "https://github.com/zai-org/ZCode",
+  "keywords": [
+    "zcode",
+    "zai",
+    "glm",
+    "coding-agent",
+    "cli",
+    "ai"
+  ],
+  "bin": {
+    "zcode": "run.js"
+  },
+  "files": [
+    "run.js",
+    "README.md",
+    "LICENSE",
+    "zcode-linux-x64",
+    "zcode-windows-x64.exe"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ]
+}
